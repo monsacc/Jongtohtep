@@ -1,0 +1,224 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
+import styles from "./waitOthers.module.css";
+
+export default function WaitOthers() {
+  const searchParams = useSearchParams();
+  const reservation_id = searchParams.get("reservationId")  || "";
+  const router = useRouter();
+  const [mode, setMode] = useState<1 | 2>(1); 
+  const [confirmed_paid_people, setConfirmed_paid_people] = useState<number>(0)
+  const [total_people, setTotal_people] = useState<number>(0)
+
+  const [time, setTime] = useState("00:00");
+  const [timeout, setTimeoutStatus] = useState(false);
+
+  useEffect(()=>{
+    const fetchTimer = async () =>{
+        try{
+            const token = localStorage.getItem("token");
+            const resTimer = await fetch(`http://localhost:8080/table/reservation/${reservation_id}/time`,{
+            headers: { Authorization: `Bearer ${token}` },
+            })
+
+            const dataTime = await resTimer.json();
+            const timeRemaining = dataTime?.time_detail?.time_remaining ?? "00:00";
+            const isTimeout = dataTime?.time_detail?.timeout ?? false;
+            console.log(isTimeout)
+            setTime(timeRemaining);
+            setTimeoutStatus(isTimeout);
+            }catch(err){
+                console.log(err);
+            }
+    };
+    fetchTimer();
+    const interval = setInterval(fetchTimer, 1000);
+    return () => clearInterval(interval);
+  })
+
+  useEffect(() => {
+      if (timeout) {
+        (async () => {
+          try {
+            const token = localStorage.getItem("token");
+            if (!token) return;
+  
+            const res = await fetch(
+              `http://localhost:8080/table/reservation/${reservation_id}`,
+              {
+                method: "DELETE",
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  "Content-Type": "application/json",
+                },
+              }
+            );
+  
+            if (!res.ok) {
+              const err = await res.text();
+              throw new Error(err);
+            }
+  
+            alert("หมดเวลา — ระบบได้ยกเลิกการจองแล้ว");
+            router.push("/home");
+          } catch (error) {
+            console.error("Error deleting reservation:", error);
+            alert("เกิดข้อผิดพลาดในการยกเลิกการจอง");
+            router.push("/");
+          }
+        })();
+      }
+    }, [timeout, router, reservation_id]);
+
+  useEffect(() => {
+    const token = localStorage.getItem("token")
+    //polling ทุก 2 วินาที
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`http://localhost:8080/table/reservation/${reservation_id}/status`, {
+            headers: {
+            "Authorization": `Bearer ${token}`,
+            "Content-Type": "application/json"
+        }});
+        if (!res.ok) throw new Error("โหลดข้อมูลการจองไม่สำเร็จ")
+        const data = await res.json();
+
+        console.log("statussssssssssss",data)
+        const reserve_status = data.status_detail.reservation_status
+        setConfirmed_paid_people(data.status_detail.confirmed_paid_people)
+        setTotal_people(data.status_detail.total_people)
+        
+        if (reserve_status === "paid") {
+          const confirm = await fetch(`http://localhost:8080/table/reservation/${reservation_id}/confirm`, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${token}`,
+              "Content-Type": "application/json"
+            }});
+          if (!confirm.ok) throw new Error("คอนเฟิร์มการจองไม่สำเร็จ")
+              
+          const confirm_resp = await confirm.json();
+          console.log(confirm_resp)
+
+          const myprofile = await fetch("http://localhost:8080/customer/profile", {
+            headers: {
+              "Authorization": `Bearer ${token}`,
+              "Content-Type": "application/json"
+            }});
+          if(!myprofile) throw new Error("ดึงข้อมูลของฉันไม่สำเร็จ")
+          
+
+          const myprofile_resp = await myprofile.json();
+          const my_usrname = myprofile_resp.username
+        
+          // noti part
+          const members = data.status_detail.members
+          // const targetMembers = members.slice(1); 
+          // if(my_usrname == members[0]) {
+          for (const member of members) {
+            const noti = {
+                event: "reserve_success",
+                receiverUsername: member.username,
+                receiverType: "customer",
+                data: {
+                    tableNo: data.status_detail.table_row + data.status_detail.table_col,
+                    when: data.status_detail.create_at,
+                    members: members.map((m: { username: string }) => m.username),
+                    reserveId: reservation_id,
+                },
+            };
+
+            const notificationRes = await fetch("http://localhost:8080/notification/event", {
+                method: "POST",
+                headers: {  
+                    "Content-Type": "application/json",
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+                body: JSON.stringify(noti),
+            });
+
+            if (!notificationRes.ok) throw new Error("ส่งโนติไม่สำเร็จ")
+
+            console.log("Notification sent to", member.username);
+            const notires = await notificationRes.json();
+            console.log(notires)
+          }
+          // }
+
+
+        }else if(reserve_status === "completed") {
+          setMode(2);
+          clearInterval(interval); //หยุด polling ไม่จำเป็นต้องเรียกแล้ว
+        }
+      } catch (error) {
+        console.error("Polling error:", error);
+      }
+    }, 2000);
+
+    return () => clearInterval(interval); 
+  }, []);
+
+  return (
+    <div className={styles.container}>
+      {mode === 1 ? (
+        <Mode1 confirmed_paid_people={confirmed_paid_people} total_people={total_people} timer={time}/>
+      ) : (
+        <Mode2 />
+      )}
+    </div>
+  );
+}
+
+function Mode1( { confirmed_paid_people, total_people, timer }: { confirmed_paid_people: number, total_people: number , timer: string }) {
+  return (
+    <div className={styles.modeCon1}>
+        <div className="styles top_content">
+            <h2>ระบบกำลังรอสมาชิกท่านอื่นสั่งอาหาร</h2>
+            <h2>{confirmed_paid_people}/{total_people}</h2>
+        </div>
+            <h2>เหลือเวลาอีก</h2>
+        <div className={styles.timer}>
+            <img src="Clock_black.svg" alt="" />
+            <h2>{timer}</h2>
+        </div>
+    </div>
+  );
+}
+
+function Mode2() {
+  const router = useRouter();
+  const [countdown, setCountdown] = useState(5); // จำนวนวินาทีเริ่มต้น
+
+  useEffect(() => {
+    if (countdown <= 0) {
+      router.push("/home");    // ถึง 0 ให้ redirect
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setCountdown(prev => prev - 1);
+    }, 10000);
+
+    return () => clearTimeout(timer);
+  }, [countdown, router]);
+
+  return (
+    <div className={styles.modeCon2}>
+      <div>
+        <h2>จองโต๊ะและสั่งอาหารสำเร็จ!</h2>
+        <h2>ระบบจะทำการหักเงินในกระเป๋าอัตโนมัติ</h2>
+      </div>
+
+      <div className={styles.buttonCon}>
+        <button className={styles.histBt} onClick={() => router.push("/history")}>
+          ดูประวัติการจอง <img src="/Arrow_Right_MD.svg" />
+        </button>
+
+        <p>กำลังกลับไปที่หน้าหลักในอีก {countdown} วินาที</p>
+      </div>
+    </div>
+  );
+}
